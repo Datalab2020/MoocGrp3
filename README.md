@@ -4,7 +4,7 @@
 
 - Fichier R
 
- ! Pas de fichier Config.yml
+ !!! Pas de fichier config.yml
 
-+++ Archive Zippée !
+ +++ Archive Zippée !
 
