@@ -1,10 +1,10 @@
-# MoocGrp3
+MoocGrp3
 
-# Fichier Python
+Fichier Python
 
-# Fichier R
+Fichier R
 
-# Pas de fichier Config.yml
+Pas de fichier Config.yml
 
-# !!!Archive Zippée!!!
+!!!Archive Zippée!!!
 
