@@ -1,0 +1,433 @@
+---
+title: "L'activité dans les MOOCs liés aux métiers"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(mongolite)
+library(config)
+library(jsonlite)
+library(ggplot2)
+library(dplyr)  
+library(httr)
+library(wordcloud)
+library(RColorBrewer)
+library(wordcloud2)
+library(tidyverse)
+library(tm)
+library(ggridges)
+library(lubridate)
+library(forcats)
+library(treemap)
+
+
+#connection----------
+credentials <- config::get("mongo")
+url <- paste("mongodb://", credentials$username, ":", credentials$password, "@127.0.0.1/bdd_grp3?authSource=admin", sep="")
+m <- mongo("NewMooc_NEW", url = url) 
+print(url)
+
+#df générale--------
+dp <- m$find(query = '{}', fields = '{"thread": 1, "created_at": 1, "course_id": 1}') %>%
+  mutate(course_id = case_when(course_id == "course-v1:Agreenium+66004+session02" ~ "L'environnement et l'aménagement du territoire",
+                               course_id == "course-v1:Uness+181001+session01" ~ "Métier de la santé",
+                               course_id == "course-v1:ulg+108006+session04" ~ "Chimie",
+                               course_id == "course-v1:umontpellier+08013+session02" ~ "Apprentissage dans l'enseignement supérieur",
+                               course_id == "course-v1:uved+34011+session02" ~ "Transition écologique",
+                               course_id == "course-v1:lyon3+26006+session04" ~ "Sciences Humaines"))
+
+```
+
+En général
+=============================
+
+Row
+-----------------------------------------------------------------------
+
+### Total des messages
+```{r}
+som <- m$aggregate('[{"$count": "body"}]')
+valueBox(som, icon = "fa-comments", color = "navy")
+```
+
+### Total des utilisateurs
+```{r}
+distUser <- m$distinct("username")
+distUser <- length(distUser)
+valueBox(distUser, icon = "fa-users", color = "teal")
+```
+
+### Total des votes
+```{r}
+votes <- m$aggregate('[{"$group": {"_id": 0, "TotalVotes": {"$sum": "$votes.count"}}}]') 
+votes <- votes[-c(1)]
+valueBox(votes, icon = "fa-star", color = "olive")
+``` 
+
+### Total des cours
+```{r}
+distCours <- m$distinct("course_id")
+distCours <- length(distCours)
+valueBox(distCours, icon = "fa-book-open", color = "green")
+```
+
+Row
+-----------------------------------------------------------------------
+
+### Nuage des Mots des messages
+```{r}
+#Word Cloud Plot---------------
+cloud <- m$find(query = '{}', fields = '{"_id" : 0, "body": 1}')
+docs <- Corpus(VectorSource(cloud))
+docs <- docs %>%
+  tm_map(removeNumbers) %>%
+  tm_map(removePunctuation) %>%
+  tm_map(stripWhitespace)
+docs <- tm_map(docs, content_transformer(tolower))
+docs <- tm_map(docs, removeWords, stopwords("french"))
+
+dtm <- TermDocumentMatrix(docs)
+matrix <- as.matrix(dtm)
+words <- sort(rowSums(matrix),decreasing=TRUE)
+
+df <- data.frame(word = names(words),freq=words)
+dfCourt <- df[1:130,]
+
+set.seed(1234)
+wordcloud2(data=dfCourt, size=1.1, color="brewer.pal"(8, "Dark2"))
+```
+
+
+Activité/sentiments
+===================================== 
+
+Row
+-------------------------------------
+
+
+### Nombre des message par utilisateur
+```{r}
+#AJOUTER LE NB DES USERS EN X
+Nbr_D <- m$aggregate('[{"$group": {"_id":"$username","NbrDiscussion": {"$sum": 1 } } }, {"$sort": {"NbrDiscussion": -1 } } ]')
+
+Nbr_D = data.frame(Nbr_D)
+
+dis <- Nbr_D %>%
+  group_by(NbrDiscussion) %>%
+  count()
+
+dis <- dis %>%
+  arrange(desc(NbrDiscussion)) %>%
+  mutate(lab.ypos = cumsum(n))
+
+Nbr_D %>%
+  drop_na() %>%
+  ggplot( aes(x= reorder(X_id, -NbrDiscussion), y= NbrDiscussion)) +
+  geom_segment( aes(x= reorder(X_id, -NbrDiscussion), xend= reorder(X_id, -NbrDiscussion), y=0, yend= NbrDiscussion), color="darkblue") +
+  geom_point( color="blue", size=2) +
+  theme_light() +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.border = element_blank(),
+    axis.text.x = element_blank()
+  ) +
+  xlab("Users") +
+  ylab("Nombre de discussions")
+```
+
+### 20 utilisateurs les plus actifs
+```{r}
+# graph nbr mess pour les 20 premiers users
+Nbr_D %>%
+  slice(1:20) %>%
+  drop_na() %>%
+  ggplot( aes(x= reorder(X_id, -NbrDiscussion), y= NbrDiscussion)) +
+  geom_segment( aes(x= reorder(X_id, -NbrDiscussion), xend= reorder(X_id, -NbrDiscussion), y=0, yend= NbrDiscussion), color="darkblue") +
+  geom_point( color="blue", size=8, alpha=0.8) +
+  theme_light() +
+  coord_flip() + xlab("Users") + ylab("Nombre de discussions") +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.title.x = element_text(color="#696969", size=10),
+    axis.title.y = element_text(color="#696969", size=10),
+    axis.text.x = element_text(color="black", size=10),
+    axis.text.y = element_text(color="black", size=10))
+
+
+```
+
+Row
+-------------------------------------
+
+### Heatmap des emotions dans les messages par cours
+```{r}
+
+emotionsRate <- m$aggregate('[{"$group": {"_id": "$course_id", "N": {"$sum": 1},\
+                            "neg": {"$sum": {"$cond": {"if": {"$gt": ["$score.neg", 0.5]},\
+                            "then": 1, "else": 0}}}, "pos": {"$sum": {"$cond": {"if": {"$gt": ["$score.pos", 0.5]},\
+                            "then": 1, "else": 0}}}, "neu": {"$sum": {"$cond": {"if": {"$gt": ["$score.neu", 0.5]}, \
+                            "then": 1, "else": 0}}}}}]')
+
+emo <- emotionsRate[,3:5]
+
+emo <- emo
+row.names(emo)[1] <- 'L\'enseignement supérieur'
+row.names(emo)[2] <- 'Sciences Humaines'
+row.names(emo)[3] <- 'L\'aménagement du territoire'
+row.names(emo)[4] <- 'Chimie'
+row.names(emo)[5] <- 'Transition écologique'
+row.names(emo)[6] <- 'Métier de la santé'
+
+names(emo)[1] <- "Negatif"
+names(emo)[2] <- "Positif"
+names(emo)[3] <- "Neutre"
+
+emo_matrix <- data.matrix(emo)
+
+my_palette <- hcl.colors(100, palette = "Blues", alpha = NULL, rev = TRUE, fixup = TRUE)[-c(1:20)]
+emo_heatmap <- heatmap(emo_matrix, Rowv=NA, Colv=NA, col = my_palette, cexCol = 1.1, cexRow = 1.1, scale="none", margins=c(8,13))
+
+```
+
+
+### Nombre des messages posté en anonyme 
+```{r}
+anon <- m$aggregate('[{"$project": {"_id": "$id", "anonymous" : 1 } }]')
+anon = data.frame(anon)
+cnt <- anon %>%
+  group_by(anonymous) %>%
+  count()
+cnt <- cnt %>%
+  arrange(desc(anonymous)) %>%
+  mutate(lab.ypos = cumsum(n) - 0.5*n)
+names(cnt)[1] <- "Utilisateurs_Anonymes"
+
+mycols <- c("#EFC000FF","#0073C2FF")
+ggplot(cnt, aes(x="", y=n, fill=Utilisateurs_Anonymes))+
+  geom_bar(width = 1, stat = "identity", color = "white")+
+  coord_polar("y", start=0)+
+  geom_text(aes(y = lab.ypos, label = n), color = "white")+
+  scale_fill_manual(values = mycols) +
+  theme_void() + labs(fill = "ANONYMES") +
+  theme(
+    legend.title = element_text(colour="#696969", size=7),
+    legend.text = element_text(colour="#696969", size=7))
+
+```
+
+Activité/titres
+=============================
+
+Row
+-------------------------------------
+
+### Nombre des votes par cours
+```{r}
+v_cours <- m$aggregate('[{"$group": {"_id": "$course_id", "N": {"$sum": "$votes.count"} } } ]') %>%
+  rename(course_id = "_id") %>%
+  arrange(desc(N)) %>%
+  mutate(course_id = case_when(course_id == "course-v1:Agreenium+66004+session02" ~ "L'environnement et l'aménagement du territoire",
+                               course_id == "course-v1:Uness+181001+session01" ~ "Métier de la santé",
+                               course_id == "course-v1:ulg+108006+session04" ~ "Chimie",
+                               course_id == "course-v1:umontpellier+08013+session02" ~ "Apprentissage dans l'enseignement supérieur",
+                               course_id == "course-v1:uved+34011+session02" ~ "Transition écologique",
+                               course_id == "course-v1:lyon3+26006+session04" ~ "Sciences Humaines"))
+ggplot(v_cours, aes(x= reorder(course_id, -N), y=N, fill=course_id)) + 
+  geom_histogram(stat = "identity", color = "white") +
+  theme(legend.position = "none") +
+  xlab("Cours") + ylab("Votes") +
+  scale_fill_hue(c=120, l=80) +
+  theme(
+    axis.title.x = element_text(color="#696969", size=15),
+    axis.title.y = element_text(color="#696969", size=15),
+    axis.text.x = element_text(color="black", size=9, angle = 45, hjust = 1),
+    axis.text.y = element_text(color="black", size=9))
+```
+
+
+### Fréquence des discussions par cours par jour
+```{r}
+
+# total des messages par cours
+t_cours <- m$aggregate('[{"$group": {"_id":"$course_id","TotalCours": {"$sum": 1 } } }]')
+colnames(t_cours)[1] <- "Cours"
+colnames(t_cours)[2] <- "Messages"
+t_cours <- mutate(t_cours, 
+                  Cours = case_when(
+                    Cours == "course-v1:Agreenium+66004+session02" ~ "L'environnement et l'aménagement du territoire",
+                    Cours == "course-v1:Uness+181001+session01" ~ "Métier de la santé",
+                    Cours == "course-v1:ulg+108006+session04" ~ "Chimie",
+                    Cours == "course-v1:umontpellier+08013+session02" ~ "Apprentissage dans l'enseignement supérieur",
+                    Cours == "course-v1:uved+34011+session02" ~ "Transition écologique",
+                    Cours == "course-v1:lyon3+26006+session04" ~ "Sciences Humaines"
+                  ))
+treePlot <- treemap(t_cours,index = c("Cours"),vSize ="Messages", palette = "Blues")
+```
+
+
+Row
+-------------------------------------
+### Nombre des discussions pas jour
+```{r}
+
+# total des messages par cours
+dtps <- dp %>%
+  mutate(dates = format(as.Date(created_at),"%Y-%m-%d")) %>%
+  group_by(dates, course_id) %>%
+  count(name = "nbdisc")
+names(dtps)[3] <- "NB_Discussions"
+# Graph de la fréquence des discussions par cours par jour
+ggplot(dtps, aes(x = NB_Discussions, y = course_id, fill = course_id)) +
+  geom_density_ridges() +
+  theme_ridges() + 
+  theme(legend.position = "none") +
+  scale_fill_hue(c=120, l=80) +
+  theme(
+    axis.title.x = element_text(color="#696969", size=7),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(color="black", size=7),
+    axis.text.y = element_text(color="black", size=7))
+
+```
+
+
+### Les mots les plus frequents dans les titres
+```{r}
+
+titles <- m$find(query = '{}', fields = '{"_id" : 0, "title": 1}')
+
+# complete.cases(titles)
+# titles <- titles[complete.cases(titles$title),]
+
+docsT <- Corpus(VectorSource(titles))
+docsT <- docsT %>%
+  tm_map(removeNumbers) %>%
+  tm_map(removePunctuation) %>%
+  tm_map(stripWhitespace)
+docsT <- tm_map(docsT, content_transformer(tolower))
+docsT <- tm_map(docsT, removeWords, stopwords("french"))
+
+termDoc <- TermDocumentMatrix(docsT) 
+matrixT <- as.matrix(termDoc) 
+wordsT <- sort(rowSums(matrixT),decreasing=TRUE) 
+dfTitle <- data.frame(word = names(wordsT),Frequency=wordsT)
+dfTitle <- dfTitle[1:20,]
+
+dfTitle %>%
+  mutate(word = fct_reorder(word, Frequency)) %>%
+  ggplot( aes(x=word, y=Frequency)) +
+        geom_bar(stat="identity", fill="#f68060", alpha=.6, width=.4) +
+        coord_flip() +
+        xlab("") +
+        theme_bw()+
+        theme(plot.margin = margin(2,.8,2,.8, "cm"))
+
+
+```
+
+Activité par cours
+=============================
+
+### Fréquence des discussions par cours dans le temps
+```{r}
+dtps <- dp %>%
+  mutate(dates = format(as.Date(created_at),"%Y-%m-%d")) %>%
+  group_by(dates, course_id) %>%
+  count(name = "nbdisc")
+
+# graph fréquence des discussions par cours dans le temps
+dtps %>%
+  filter(dates >= "2020-09-22") %>%
+  ggplot(aes(x= as.Date(dates), y= nbdisc, group= course_id, fill = course_id)) + geom_col() +
+  scale_fill_hue(c=120, l=80) +
+  xlab("Dates") + ylab("Nombre Discussions") + labs(fill = "Cours") +
+  theme(
+    axis.title.x = element_text(color="#696969", size=7),
+    axis.title.y = element_text(color="#696969", size=7)) +
+  theme(
+    legend.title = element_text(colour="#696969", size=7),
+    legend.text = element_text(colour="#696969", size=7),
+    axis.text.x = element_text(color="black", size=6),
+    axis.text.y = element_text(color="black", size=6))
+```
+
+
+
+Activité pas heure
+=============================
+
+### Messages par heure et par cours
+```{r}
+
+# Messages par heure et par cours
+dd <- m$find(query = '{}', fields = '{"course_id": 1, "created_at": 1}') %>%
+  mutate(course_id = case_when(course_id == "course-v1:Agreenium+66004+session02" ~ "L'environnement et l'aménagement du territoire",
+                               course_id == "course-v1:Uness+181001+session01" ~ "Métier de la santé",
+                               course_id == "course-v1:ulg+108006+session04" ~ "Chimie",
+                               course_id == "course-v1:umontpellier+08013+session02" ~ "Apprentissage dans l'enseignement supérieur",
+                               course_id == "course-v1:uved+34011+session02" ~ "Transition écologique",
+                               course_id == "course-v1:lyon3+26006+session04" ~ "Sciences Humaines"))
+
+var <- as.POSIXct(dd$created_at, format = "%Y-%m-%dT%H:%M:%SZ")
+hours <- format(var, "%H")
+
+# graph des messages par heure et par cours
+ggplot(dd, aes(x= hours, y="", fill=`course_id`)) + geom_col() +
+  xlab("Heures") + ylab("Messages") + labs(fill = "Cours") + 
+  annotation_logticks(sides = "l", short = unit(0,"mm"),
+                        mid = unit(0,"mm"),
+                        long = unit(2,"mm")) +
+  scale_fill_hue(c=120, l=80) +
+  theme(
+    axis.title.x = element_text(color="#696969", size=7),
+    axis.title.y = element_text(color="#696969", size=7),
+    legend.title = element_text(colour="#696969", size=7),
+    legend.text = element_text(colour="#696969", size=7),
+    axis.text.x = element_text(color="black", size=5))
+```
+
+
+En détails
+=============================
+
+### Variance des discussions par semaine et par heure
+```{r}
+
+dp <- m$find(query = '{}', fields = '{"thread": 1, "created_at": 1, "course_id": 1}') %>%
+  mutate(course_id = case_when(course_id == "course-v1:Agreenium+66004+session02" ~ "L'environnement et l'aménagement du territoire",
+                               course_id == "course-v1:Uness+181001+session01" ~ "Métier de la santé",
+                               course_id == "course-v1:ulg+108006+session04" ~ "Chimie",
+                               course_id == "course-v1:umontpellier+08013+session02" ~ "Apprentissage dans l'enseignement supérieur",
+                               course_id == "course-v1:uved+34011+session02" ~ "Transition écologique",
+                               course_id == "course-v1:lyon3+26006+session04" ~ "Sciences Humaines"))
+# graph variance des discussions par semaine et par heure
+x <- dp %>%
+  mutate(Jours = wday(created_at, label = TRUE, abbr = FALSE, week_start = 1),
+         Heures = format(as.POSIXct(created_at, format = "%Y-%m-%dT%H:%M:%SZ"), "%H")) %>%
+  group_by(Jours, Heures) %>%
+  summarise(total = n()) %>%
+  ungroup() %>%
+  mutate(Pourcentage = total/sum(total)*100) %>%
+  ggplot(aes(Heures, Jours)) + 
+  geom_tile(aes(fill = Pourcentage), colour = "white") + 
+  scale_fill_distiller(palette = "RdPu", direction = 1) +
+  scale_x_discrete(labels = 00:23) + 
+  theme_minimal() +
+  theme(legend.position = "bottom", legend.key.width = unit(2, "cm"),
+        panel.grid = element_blank()) + 
+  theme(axis.line = element_line(colour = "black", 
+        size = 0.25, linetype = "solid")) +
+  theme(
+    axis.title.x = element_text(color="#696969", size=7),
+    axis.title.y = element_text(color="#696969", size=7),
+    legend.title = element_text(colour="#696969", size=7),
+    legend.text = element_text(colour="#696969", size=7),
+    axis.text.x = element_text(color="black", size=11),
+    axis.text.y = element_text(color="black", size=11)) +
+  coord_equal()
+print(x)
+```
